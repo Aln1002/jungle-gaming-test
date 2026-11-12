@@ -1,0 +1,63 @@
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: wagering_test
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: local-test-only
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U postgres -d wagering_test']
+      interval: 3s
+      timeout: 5s
+      retries: 20
+
+  localstack:
+    image: localstack/localstack:4
+    environment:
+      SERVICES: sqs
+      AWS_DEFAULT_REGION: us-east-1
+      SQS_ENDPOINT_STRATEGY: path
+    healthcheck:
+      test:
+        [
+          'CMD',
+          'bash',
+          '-c',
+          'curl -fsS http://localhost:4566/_localstack/health >/dev/null',
+        ]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  queue-init:
+    build:
+      context: .
+      target: build
+    command: ['bun', 'dist/scripts/create-local-queues.js']
+    environment:
+      NODE_ENV: test
+      SQS_ENDPOINT: http://localstack:4566
+      AWS_REGION: us-east-1
+      AWS_ACCESS_KEY_ID: test
+      AWS_SECRET_ACCESS_KEY: test
+    depends_on:
+      localstack:
+        condition: service_healthy
+
+  tests:
+    build:
+      context: .
+      target: build
+    command: ['bun', 'test']
+    environment:
+      NODE_ENV: test
+      TEST_DATABASE_URL: postgresql://postgres:local-test-only@postgres:5432/wagering_test
+      TEST_SQS_ENDPOINT: http://localstack:4566
+      AWS_REGION: us-east-1
+      AWS_ACCESS_KEY_ID: test
+      AWS_SECRET_ACCESS_KEY: test
+    depends_on:
+      postgres:
+        condition: service_healthy
+      queue-init:
+        condition: service_completed_successfully

@@ -1,0 +1,63 @@
+services:
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.3.5
+    command: ['start-dev', '--import-realm']
+    env_file:
+      - config/env/keycloak.local.env
+    environment:
+      KC_HOSTNAME: http://keycloak:8080
+    volumes:
+      - ./docker/keycloak/wagering-realm.json:/opt/keycloak/data/import/wagering-realm.json:ro
+
+  app:
+    build:
+      context: .
+    environment:
+      NODE_ENV: test
+      PORT: 3000
+      DATABASE_URL: postgresql://postgres:local-test-only@postgres:5432/wagering_test
+      OIDC_ISSUER_URL: http://keycloak:8080/realms/wagering
+      OIDC_JWKS_URL: http://keycloak:8080/realms/wagering/protocol/openid-connect/certs
+      OIDC_AUDIENCE: wagering-api
+      SQS_ENDPOINT: http://localstack:4566
+      AWS_REGION: us-east-1
+      AWS_ACCESS_KEY_ID: test
+      AWS_SECRET_ACCESS_KEY: test
+    depends_on:
+      postgres:
+        condition: service_healthy
+      queue-init:
+        condition: service_completed_successfully
+      keycloak:
+        condition: service_started
+    healthcheck:
+      test:
+        [
+          'CMD',
+          'bun',
+          '-e',
+          "fetch('http://127.0.0.1:3000/health/ready').then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))",
+        ]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    stop_grace_period: 30s
+
+  e2e:
+    build:
+      context: .
+      target: build
+    command: ['bun', 'test', './test/e2e/full-stack.e2e.test.ts']
+    env_file:
+      - config/env/keycloak.local.env
+    environment:
+      E2E_API_URL: http://app:3000
+      E2E_IDP_URL: http://keycloak:8080
+      TEST_SQS_ENDPOINT: http://localstack:4566
+      TEST_DATABASE_URL: postgres://postgres:local-test-only@postgres:5432/wagering_test
+      AWS_REGION: us-east-1
+      AWS_ACCESS_KEY_ID: test
+      AWS_SECRET_ACCESS_KEY: test
+    depends_on:
+      app:
+        condition: service_healthy

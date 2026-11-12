@@ -1,0 +1,128 @@
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: wagering
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: local-dev-only
+    ports:
+      - '127.0.0.1:5433:5432'
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U postgres -d wagering']
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  localstack:
+    image: localstack/localstack:4
+    environment:
+      SERVICES: sqs
+      AWS_DEFAULT_REGION: us-east-1
+      SQS_ENDPOINT_STRATEGY: path
+    ports:
+      - '127.0.0.1:4566:4566'
+    volumes:
+      - localstack_data:/var/lib/localstack
+    healthcheck:
+      test:
+        [
+          'CMD',
+          'bash',
+          '-c',
+          'curl -fsS http://localhost:4566/_localstack/health >/dev/null',
+        ]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.3.5
+    command: ['start-dev', '--import-realm']
+    env_file:
+      - config/env/keycloak.local.env
+    environment:
+      KC_HOSTNAME: http://localhost:8080
+    ports:
+      - '127.0.0.1:8080:8080'
+    volumes:
+      - ./docker/keycloak/wagering-realm.json:/opt/keycloak/data/import/wagering-realm.json:ro
+
+  queue-init:
+    build:
+      context: .
+    command: ['bun', 'dist/scripts/create-local-queues.js']
+    environment:
+      NODE_ENV: development
+      SQS_ENDPOINT: http://localstack:4566
+      AWS_REGION: us-east-1
+      AWS_ACCESS_KEY_ID: test
+      AWS_SECRET_ACCESS_KEY: test
+    depends_on:
+      localstack:
+        condition: service_healthy
+    restart: 'no'
+
+  app:
+    build:
+      context: .
+    environment:
+      NODE_ENV: development
+      PORT: 3000
+      OIDC_ISSUER_URL: http://localhost:8080/realms/wagering
+      OIDC_JWKS_URL: http://keycloak:8080/realms/wagering/protocol/openid-connect/certs
+      OIDC_AUDIENCE: wagering-api
+      OIDC_PROVIDER_ID_CLAIM: providerId
+      DATABASE_URL: postgresql://postgres:local-dev-only@postgres:5432/wagering
+      SQS_ENDPOINT: http://localstack:4566
+      SQS_ACCOUNT_ID: 000000000000
+      SQS_TRANSACTION_QUEUE_URL: http://localstack:4566/000000000000/wager-transactions.fifo
+      SQS_TRANSACTION_DLQ_URL: http://localstack:4566/000000000000/wager-transactions-dlq.fifo
+      SQS_EVENT_QUEUE_URL: http://localstack:4566/000000000000/wager-events.fifo
+      SQS_EVENT_DLQ_URL: http://localstack:4566/000000000000/wager-events-dlq.fifo
+      AWS_REGION: us-east-1
+      AWS_ACCESS_KEY_ID: test
+      AWS_SECRET_ACCESS_KEY: test
+    ports:
+      - '127.0.0.1:3000:3000'
+    depends_on:
+      postgres:
+        condition: service_healthy
+      queue-init:
+        condition: service_completed_successfully
+      keycloak:
+        condition: service_started
+    stop_grace_period: 30s
+    healthcheck:
+      test:
+        [
+          'CMD',
+          'bun',
+          '-e',
+          "fetch('http://127.0.0.1:3000/health/live').then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  load-test:
+    profiles: ['load']
+    build:
+      context: .
+      target: build
+    command: ['bun', 'run', 'test:load']
+    env_file:
+      - config/env/keycloak.local.env
+    environment:
+      LOAD_API_URL: http://app:3000
+      LOAD_IDP_URL: http://keycloak:8080
+      LOAD_REQUESTS: ${LOAD_REQUESTS:-30}
+      LOAD_CONCURRENCY: ${LOAD_CONCURRENCY:-10}
+    depends_on:
+      app:
+        condition: service_healthy
+
+volumes:
+  postgres_data:
+  localstack_data:

@@ -1,0 +1,10 @@
+.git
+.env
+.env.*
+!.env.example
+config/env/*.env
+config/env/env.*
+node_modules
+dist
+coverage
+*.tsbuildinfo
